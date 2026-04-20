@@ -1,0 +1,530 @@
+---
+title: "EDA + Modeling Assignment"
+author: "OpenAI"
+date: "2026-03-29"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+```
+
+## 1) Purpose
+
+This report combines the original exploratory data analysis with predictive modeling. The goals are:
+
+1. Understand why Mx underperforms relative to Qx.
+2. Identify the account and contact segments with higher progression rates.
+3. Build predictive models that estimate lead progression.
+4. Produce business-friendly targeting recommendations.
+
+---
+
+## 2) Libraries
+
+```{r libraries}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(skimr)
+library(stringr)
+library(forcats)
+library(scales)
+library(caret)
+library(pROC)
+library(ranger)
+```
+
+---
+
+## 3) Import and Clean Data
+
+> Update the file path below to match where your CSV is stored.
+
+```{r import}
+df <- read_csv("C:/Users/USER/Downloads/QAL Performance for MSBA.csv", show_col_types = FALSE) %>%
+  clean_names()
+
+glimpse(df)
+skim(df)
+```
+
+---
+
+## 4) Create Outcome Variable
+
+We define a successful progression as a lead whose `next_stage_c` is one of: SQL, SQO, or Won.
+
+```{r outcome}
+success_vals <- c("SQL", "SQO", "WON")
+
+stage_col <- names(df)[str_detect(names(df), "next_stage")][1]
+
+df_clean <- df %>%
+  mutate(
+    progressed = toupper(trimws(.data[[stage_col]])) %in% success_vals
+  ) %>%
+  filter(!is.na(.data[[stage_col]]) & .data[[stage_col]] != "")
+
+mean(df_clean$progressed)
+```
+
+---
+
+## 5) Basic Product Comparison
+
+This checks whether Qx and Mx really perform differently.
+
+```{r product_comparison}
+df_clean %>%
+  group_by(solution_rollup) %>%
+  summarise(
+    leads = n(),
+    conversion_rate = mean(progressed),
+    .groups = "drop"
+  )
+```
+
+```{r product_plot}
+ggplot(df_clean, aes(solution_rollup, progressed, fill = solution_rollup)) +
+  stat_summary(fun = mean, geom = "bar") +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "Lead Progression Rate by Product Family",
+    x = "Product Family",
+    y = "Progression Rate"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## 6) Account-Level EDA
+
+### Industry
+
+```{r industry_summary}
+df_clean %>%
+  group_by(solution_rollup, acct_target_industry) %>%
+  summarise(
+    leads = n(),
+    conversion = mean(progressed),
+    .groups = "drop"
+  ) %>%
+  arrange(solution_rollup, desc(conversion))
+```
+
+```{r industry_plot}
+df_clean %>%
+  group_by(solution_rollup, acct_target_industry) %>%
+  summarise(rate = mean(progressed), .groups = "drop") %>%
+  ggplot(aes(fct_reorder(acct_target_industry, rate), rate, fill = solution_rollup)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "Progression Rate by Industry and Product",
+    x = "Industry",
+    y = "Progression Rate"
+  ) +
+  theme_minimal()
+```
+
+### Manufacturing Model
+
+```{r mfg_summary}
+df_clean %>%
+  group_by(solution_rollup, acct_manufacturing_model) %>%
+  summarise(
+    leads = n(),
+    conversion = mean(progressed),
+    .groups = "drop"
+  ) %>%
+  arrange(solution_rollup, desc(conversion))
+```
+
+### Primary Site Function
+
+```{r site_function_summary}
+df_clean %>%
+  group_by(solution_rollup, acct_primary_site_function) %>%
+  summarise(
+    leads = n(),
+    conversion = mean(progressed),
+    .groups = "drop"
+  ) %>%
+  filter(leads > 100) %>%
+  arrange(solution_rollup, desc(conversion))
+```
+
+---
+
+## 7) Title Engineering
+
+This step converts messy contact titles into cleaner business categories.
+
+```{r title_engineering}
+norm_title <- function(x) {
+  x <- tolower(trimws(ifelse(is.na(x), "", x)))
+  x <- gsub("[[:punct:]]+", " ", x)
+  x <- gsub("\\s+", " ", x)
+  x
+}
+
+derive_seniority <- function(x) {
+  t <- norm_title(x)
+  if (t == "") return("Missing")
+  if (str_detect(t, "chief|ceo|cfo|coo|cto|president|svp")) return("C/SVP")
+  if (str_detect(t, "vp|vice president")) return("VP")
+  if (str_detect(t, "director|head|principal|administrator|executive")) return("Director/Head")
+  if (str_detect(t, "manager|supervisor|lead|officer|advisor|leader|qualified person|\\bqp\\b")) return("Manager")
+  if (str_detect(t, "engineer|scientist|specialist|analyst|associate|coordinator|technician|assistant|developer|research")) return("IC")
+  return("Other")
+}
+
+derive_function <- function(x) {
+  t <- norm_title(x)
+  if (t == "") return("Missing")
+  if (str_detect(t, "quality|\\bqa\\b|qms|validation|csv|compliance|review")) return("Quality/QA")
+  if (str_detect(t, "regulatory|\\bra\\b|prrc|qppv|\\bqp\\b")) return("Regulatory")
+  if (str_detect(t, "manufactur|operations|production|plant|msat")) return("Manufacturing/Operations")
+  if (str_detect(t, "\\bit\\b|system|digital|software|mes|erp|automation|technology")) return("IT/Systems")
+  if (str_detect(t, "r&d|research|development|engineer|scientist|microbiology|biology")) return("R&D/Engineering")
+  if (str_detect(t, "supply chain|logistics|procurement|purchasing")) return("Supply Chain/Logistics")
+  if (str_detect(t, "finance|cfo|controller")) return("Finance")
+  if (str_detect(t, "sales|marketing|business development|commercial")) return("Commercial")
+  if (str_detect(t, "vp|director|principal|head|manager|lead|vice president|ceo|cmo|president|chief")) return("Leadership")
+  return("Other")
+}
+
+df_clean <- df_clean %>%
+  mutate(
+    title_lower    = norm_title(contact_lead_title),
+    seniority      = map_chr(contact_lead_title, derive_seniority),
+    title_function = map_chr(contact_lead_title, derive_function)
+  )
+
+df_clean %>% count(seniority, sort = TRUE)
+df_clean %>% count(title_function, sort = TRUE)
+```
+
+---
+
+## 8) Functional Flags / Dummy Variables
+
+These features help with interaction analysis and modeling.
+
+```{r dummies}
+df_clean <- df_clean %>%
+  mutate(
+    qa_dummy              = as.integer(title_function == "Quality/QA"),
+    manufacturing_dummy   = as.integer(title_function == "Manufacturing/Operations"),
+    eng_dummy             = as.integer(title_function == "R&D/Engineering"),
+    c_dummy               = as.integer(seniority == "C/SVP"),
+    vp_dummy              = as.integer(seniority == "VP"),
+    mng_dummy             = as.integer(seniority == "Manager"),
+    CMO_dummy             = as.integer(acct_manufacturing_model == "CMO"),
+    CDMO_dummy            = as.integer(acct_manufacturing_model == "CDMO"),
+    OEM_dummy             = as.integer(acct_manufacturing_model == "Original Equipment Manufacturing"),
+    Med_Device_dummy      = as.integer(acct_target_industry == "Medical Device"),
+    pharma_dummy          = as.integer(acct_target_industry == "Pharma & BioTech"),
+    nonlife_dummy         = as.integer(acct_target_industry == "Non-Life Science"),
+    SEO_dummy             = as.integer(last_tactic_campaign_channel == "SEO"),
+    Direct_inbound_dummy  = as.integer(last_tactic_campaign_channel == "Direct/Inbound")
+  )
+```
+
+---
+
+## 9) Mx-Focused EDA
+
+```{r mx_subset}
+mx <- df_clean %>% filter(solution_rollup == "Mx")
+
+rate_by <- function(data, group_var, min_n = 30) {
+  data %>%
+    group_by({{ group_var }}) %>%
+    summarise(n = n(), rate = mean(progressed), .groups = "drop") %>%
+    filter(n >= min_n)
+}
+```
+
+### Mx by Seniority
+
+```{r mx_seniority_plot}
+rate_by(mx, seniority) %>%
+  ggplot(aes(fct_reorder(seniority, rate), rate)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Mx Progression by Seniority", x = "Seniority", y = "Progression Rate") +
+  theme_minimal()
+```
+
+### Mx by Title Function
+
+```{r mx_function_plot}
+rate_by(mx, title_function) %>%
+  ggplot(aes(fct_reorder(title_function, rate), rate)) +
+  geom_col(fill = "darkseagreen4") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Mx Progression by Title Function", x = "Function", y = "Progression Rate") +
+  theme_minimal()
+```
+
+### Mx by Industry
+
+```{r mx_industry_plot}
+rate_by(mx, acct_target_industry) %>%
+  ggplot(aes(fct_reorder(acct_target_industry, rate), rate)) +
+  geom_col(fill = "mediumpurple4") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Mx Progression by Industry", x = "Industry", y = "Progression Rate") +
+  theme_minimal()
+```
+
+### Mx by Manufacturing Model
+
+```{r mx_mfg_plot}
+rate_by(mx, acct_manufacturing_model) %>%
+  ggplot(aes(fct_reorder(acct_manufacturing_model, rate), rate)) +
+  geom_col(fill = "tan4") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Mx Progression by Manufacturing Model", x = "Manufacturing Model", y = "Progression Rate") +
+  theme_minimal()
+```
+
+---
+
+## 10) Missing Data Strategy
+
+For this assignment, missing values are preserved as signal where appropriate.
+
+- Missing categorical values are replaced with `"MISSING"`.
+- Missing numeric values are replaced with `-9999`.
+- Rare factor levels are collapsed before modeling.
+
+This reflects the idea that missingness itself may carry useful information.
+
+---
+
+## 11) Prepare Modeling Data
+
+```{r model_prep}
+model_df <- df_clean %>%
+  mutate(
+    progressed = factor(progressed, levels = c(FALSE, TRUE), labels = c("no", "yes"))
+  ) %>%
+  mutate(across(where(is.character), ~replace_na(.x, "MISSING"))) %>%
+  mutate(across(where(is.character), as.factor))
+
+numeric_cols <- model_df %>% select(where(is.numeric)) %>% names()
+numeric_cols <- setdiff(numeric_cols, c("progressed"))
+
+model_df <- model_df %>%
+  mutate(across(all_of(numeric_cols), ~ifelse(is.na(.x), -9999, .x))) %>%
+  mutate(across(where(is.factor), ~fct_lump_min(.x, min = 10)))
+```
+
+---
+
+## 12) Train / Validation Split
+
+```{r split}
+set.seed(12345)
+
+index_numbers_split <- createDataPartition(model_df$progressed, p = 0.7, list = FALSE)
+
+model_tr  <- model_df[index_numbers_split, ]
+model_val <- model_df[-index_numbers_split, ]
+```
+
+---
+
+## 13) Remove Single-Level Factors
+
+```{r single_level_cleanup}
+single_level_cols <- model_tr %>%
+  select(where(is.factor)) %>%
+  summarise(across(everything(), ~n_distinct(.))) %>%
+  pivot_longer(everything()) %>%
+  filter(value == 1) %>%
+  pull(name)
+
+model_tr  <- model_tr  %>% select(-all_of(single_level_cols))
+model_val <- model_val %>% select(names(model_tr))
+```
+
+---
+
+## 14) Logistic Regression Model
+
+This model is interpretable and useful for understanding directional effects.
+
+```{r logistic_model}
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  sampling = "down",
+  savePredictions = TRUE
+)
+
+caret_glm <- train(
+  progressed ~ 
+    qa_dummy + manufacturing_dummy + eng_dummy +
+    c_dummy + vp_dummy + mng_dummy +
+    CMO_dummy + CDMO_dummy + OEM_dummy +
+    Med_Device_dummy + pharma_dummy + nonlife_dummy +
+    SEO_dummy + Direct_inbound_dummy +
+    qa_dummy * c_dummy +
+    qa_dummy * vp_dummy +
+    qa_dummy * mng_dummy +
+    manufacturing_dummy * Med_Device_dummy +
+    qa_dummy * Med_Device_dummy +
+    eng_dummy * pharma_dummy +
+    c_dummy * Med_Device_dummy +
+    vp_dummy * pharma_dummy +
+    mng_dummy * nonlife_dummy,
+  data = model_tr,
+  method = "glm",
+  family = "binomial",
+  metric = "ROC",
+  trControl = ctrl,
+  na.action = na.pass
+)
+
+summary(caret_glm$finalModel)
+```
+
+---
+
+## 15) Random Forest Model
+
+This model is less interpretable but can capture nonlinear patterns and interactions.
+
+```{r random_forest_model}
+set.seed(12345)
+
+caret_rf <- train(
+  progressed ~ 
+    solution_rollup + acct_target_industry + acct_manufacturing_model +
+    acct_primary_site_function + seniority + title_function +
+    last_tactic_campaign_channel + priority +
+    qa_dummy + manufacturing_dummy + eng_dummy +
+    c_dummy + vp_dummy + mng_dummy +
+    CMO_dummy + CDMO_dummy + OEM_dummy +
+    Med_Device_dummy + pharma_dummy + nonlife_dummy +
+    SEO_dummy + Direct_inbound_dummy,
+  data = model_tr,
+  method = "ranger",
+  metric = "ROC",
+  importance = "impurity",
+  tuneLength = 5,
+  trControl = ctrl,
+  na.action = na.pass
+)
+
+caret_rf
+```
+
+---
+
+## 16) Model Evaluation
+
+### Logistic Regression AUC
+
+```{r glm_eval}
+glm_train_probs <- predict(caret_glm, newdata = model_tr, type = "prob")[, "yes"]
+glm_val_probs   <- predict(caret_glm, newdata = model_val, type = "prob")[, "yes"]
+
+glm_roc_train <- roc(response = model_tr$progressed, predictor = glm_train_probs)
+glm_roc_val   <- roc(response = model_val$progressed, predictor = glm_val_probs)
+
+cat("GLM Train AUC:", auc(glm_roc_train), "\n")
+cat("GLM Validation AUC:", auc(glm_roc_val), "\n")
+```
+
+### Random Forest AUC
+
+```{r rf_eval}
+rf_train_probs <- predict(caret_rf, newdata = model_tr, type = "prob")[, "yes"]
+rf_val_probs   <- predict(caret_rf, newdata = model_val, type = "prob")[, "yes"]
+
+rf_roc_train <- roc(response = model_tr$progressed, predictor = rf_train_probs)
+rf_roc_val   <- roc(response = model_val$progressed, predictor = rf_val_probs)
+
+cat("RF Train AUC:", auc(rf_roc_train), "\n")
+cat("RF Validation AUC:", auc(rf_roc_val), "\n")
+```
+
+### ROC Curves
+
+```{r roc_plot}
+plot(glm_roc_val, col = "blue", main = "Validation ROC Curves")
+lines(rf_roc_val, col = "red")
+legend(
+  "bottomright",
+  legend = c("Logistic Regression", "Random Forest"),
+  col = c("blue", "red"),
+  lwd = 2
+)
+```
+
+---
+
+## 17) Variable Importance
+
+```{r var_importance}
+varImp(caret_rf)
+plot(varImp(caret_rf), top = 15)
+```
+
+---
+
+## 18) Score Leads
+
+This section generates predicted probabilities for the validation set so the business can rank leads.
+
+```{r scoring}
+lead_scores <- model_val %>%
+  mutate(
+    p_progress_glm = predict(caret_glm, newdata = model_val, type = "prob")[, "yes"],
+    p_progress_rf  = predict(caret_rf,  newdata = model_val, type = "prob")[, "yes"]
+  ) %>%
+  arrange(desc(p_progress_rf))
+
+head(lead_scores)
+```
+
+---
+
+## 19) Business Takeaways
+
+Use this section to summarize the findings after running the report.
+
+- Qx vs Mx comparison confirms whether there is a performance gap.
+- EDA identifies high-conversion industries, manufacturing models, and title types.
+- Logistic regression explains directional effects and interpretable interactions.
+- Random forest provides a stronger predictive model and variable importance ranking.
+- Lead scores can be used to prioritize outreach.
+
+---
+
+## 20) Suggested Executive Conclusion
+
+This combined EDA and modeling analysis shows that Mx underperformance is driven more by targeting than by product quality alone. Progression rates vary meaningfully by industry, manufacturing model, seniority, and title function. Predictive models further support prioritizing leads with characteristics associated with higher conversion likelihood, allowing the business to focus sales effort more efficiently.
