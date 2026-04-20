@@ -1,4 +1,4 @@
-# Mater-Control
+# Master-Control
 This is my individual modeling for the master control project.
 Lead Conversion Analysis & Modeling
 Business Problem
