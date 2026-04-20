@@ -13,35 +13,37 @@ I analyzed the data to understand differences in conversion across segments and 
 
 The approach included:
 
-Cleaning and preparing the data
-Defining a “progressed” outcome
-Comparing performance across product lines
-Building a Random Forest model
-Evaluating performance using ROC/AUC
+1. Cleaning and preparing the data
+2. Defining a “progressed” outcome
+3. Comparing performance across product lines
+4. Building a Random Forest model
+5. Evaluating performance using ROC/AUC
 
 My Contributions
-Cleaned and prepared the dataset in R
-Created the target variable for lead progression
-Performed exploratory analysis to identify patterns
-Built and evaluated a Random Forest model
-Developed visualizations and interpreted results
+1. Cleaned and prepared the dataset in R
+2. Created the target variable for lead progression
+3. Performed exploratory analysis to identify patterns
+4. Built and evaluated a Random Forest model
+5. Developed visualizations and interpreted results
+
 Business Value
 
 This model helps identify high-quality leads earlier, allowing teams to prioritize outreach and improve efficiency.
 
 This can lead to:
 
-Better targeting of promising leads
-More efficient use of sales and marketing resources
-Higher conversion rates
+1. Better targeting of promising leads
+2. More efficient use of sales and marketing resources
+3. Higher conversion rates
+
 Challenges
-Handling missing and inconsistent data
-Selecting meaningful features
-Avoiding overfitting
-Translating technical results into business insights
+1. Handling missing and inconsistent data
+2. Selecting meaningful features
+3. Avoiding overfitting
+4. Translating technical results into business insights
 
 What I Learned
-Applying modeling to a real business problem
-The importance of clean, reproducible workflows
-Evaluating models using ROC/AUC
-Communicating insights clearly
+1. Applying modeling to a real business problem
+2. The importance of clean, reproducible workflows
+3. Evaluating models using ROC/AUC
+4. Communicating insights clearly
